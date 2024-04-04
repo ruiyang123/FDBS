@@ -40,6 +40,12 @@ For cifar100 :
 ...
 ```
 
+```bash
+For FairWaste DataSet : 
+
+Download from the following sites [Class-Incremental scenario](https://drive.google.com/file/d/1SuX8E_6TLlgQ1txjk6x-VvWmwj9zFUFL/view?usp=sharing) and [Domain-Incremental scenario](https://drive.google.com/file/d/1SuX8E_6TLlgQ1txjk6x-VvWmwj9zFUFL/view?usp=sharing)
+```
+
 ## Run experiments 
 Our codes is running in the python3 environment. We use **pyhon** to call python3 environment.
 If you are in the different situation, you should change all **python** to **python3** for Benchmark_PACS.sh, Benchmark_cifar.sh, Experiment_cifar.py, Experiment_PACS.py
