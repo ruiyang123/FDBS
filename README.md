@@ -43,25 +43,36 @@ For cifar100 :
 ```bash
 For FairWaste DataSet : 
 ```
-Download from the following sites [Class-Incremental scenario](https://drive.google.com/file/d/1SuX8E_6TLlgQ1txjk6x-VvWmwj9zFUFL/view?usp=sharing) and 
+
+Download from the following sites our prepared scenario files [Class-Incremental scenario](https://drive.google.com/file/d/1SuX8E_6TLlgQ1txjk6x-VvWmwj9zFUFL/view?usp=sharing) and 
 [Domain-Incremental scenario](https://drive.google.com/file/d/1SuX8E_6TLlgQ1txjk6x-VvWmwj9zFUFL/view?usp=sharing)
 
+Or 
 
-## Run experiments 
-Our codes is running in the python3 environment. We use **pyhon** to call python3 environment.
-If you are in the different situation, you should change all **python** to **python3** for Benchmark_PACS.sh, Benchmark_cifar.sh, Experiment_cifar.py, Experiment_PACS.py
+You can also prepare your scenario by creating a .csv file such as [./CIL_scenario.csv](./CIL_scenario.csv). Then run 
+```bash
+python pk_gene_FW.py
+```
+To create the scenario to be used for training.
 
-
-More details about the experimental protocols are illustrated in [./cvpr2022_supplementary_material.pdf](./cvpr2022_supplementary_material.pdf).
-
-For PACS you can run  
-```'bash
-$ sh Benchmark_PACS.sh
+## Run Methods
+```bash
+For Experience Replay :
+python main.py --factor scenario_name --iters 300 --savepath savepath --tasks task_num --repaly=exemplars --budget budget --select-memory random
 ```
 
-For cifar100 you can run  
 ```bash
-$ sh Benchmark_cifar.sh
+For FDBS :
+python main.py --factor scenario_name --iters 300 --savepath savepath --tasks task_num --repaly=exemplars --budget budget --select-memory FDBS
+```
+
+
+
+## Run Experiment
+
+```bash
+For FairWaste DataSet :
+python Experiment_FairWaste.py
 ```
 
 
