@@ -58,7 +58,7 @@ To create the scenario to be used for training.
 ## Run Methods
 ```bash
 For Experience Replay :
-python main.py --factor scenario_name --iters 300 --savepath savepath --tasks task_num --repaly=exemplars --budget budget --select-memory random
+python main.py --factor {} --iters {} --savepath={} --optimizer=adam --tasks {} --batch {} --reInitOptimizer 1 --rs 1 --budget={} --select-memory random --meta 0 --lr 5e-5"
 ```
 
 ```bash
