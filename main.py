@@ -12,6 +12,7 @@ import torch
 from torch import optim
 from torchsummary import summary
 import utils
+import my_transform
 from param_stamp import get_param_stamp, get_param_stamp_from_args
 import evaluate
 from data import get_multitask_experiment
@@ -88,6 +89,7 @@ parser.add_argument('--agem', action='store_true', help="use gradient of replay 
 parser.add_argument("--fromp",action='store_true',help="use fromp optimizer")
 parser.add_argument("--select-method",type=str,default="random")
 parser.add_argument("--iwl",type=int,default=0)
+parser.add_argument("--da",type=int,default=0)
 
 parser.add_argument('--icarl', action='store_true')
 parser.add_argument('--use-exemplars', action='store_true')
@@ -127,6 +129,7 @@ parser.add_argument("--drop-p", type=float,default=0)
 
 parser.add_argument("--select-memory", type=str,default="random")
 parser.add_argument("--experiment",type=int,default=1)
+parser.add_argument("--retrain",type=int,default=0)
 
 # Meta Learning
 
@@ -231,7 +234,7 @@ def run(args):
             fc_layers=args.fc_lay, fc_units=args.fc_units, fc_drop=args.fc_drop, fc_nl=args.fc_nl,
             fc_bn=True if args.fc_bn == "yes" else False, excit_buffer=True if args.gating_prop > 0 else False,
             binaryCE=args.bce, binaryCE_distill=True,AGEM=args.agem,fromp = args.fromp,select_method=args.select_method
-        ,ps=args.ps,auto_lwf=args.autolwf,contrasive=args.contrasive).to(device)
+        ,ps=args.ps,auto_lwf=args.autolwf,contrasive=args.contrasive,da = args.da).to(device)
     summary(model,(3,50,50))
     # Define optimizer (only include parameters that "requires_grad")
     model.optim_list = [{'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr}]
@@ -270,6 +273,7 @@ def run(args):
     model.budget = args.budget
     model.remove_method = args.remove
     model.iwl = args.iwl
+    model.retrain = args.retrain
 
     if model.use_schedular == 1:
         model.scheduler = ExponentialLR(model.optimizer,gamma = args.gammalr)
@@ -427,8 +431,8 @@ def run(args):
 
 if __name__ == '__main__':
     # batch_size = 8
-    # budget = 100
-    # iters = 200
+    # budget = 200
+    # iters = 100
 
     args = parser.parse_args()
     # args.factor = "CIL_scenario"
@@ -442,10 +446,11 @@ if __name__ == '__main__':
     # args.budget = budget
     # args.select_memory = "FDBS"
     # args.meta = 0
-    # args.distill = True
+    # args.da = 0
+    # args.iwl = 0
     # args.rs = 1
-    # args.ps = True
     # args.remove = "random"
+    # args.retrain = 1
 
 
     run(args)

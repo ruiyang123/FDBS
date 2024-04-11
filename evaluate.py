@@ -3,7 +3,7 @@ import torch
 import visual_visdom
 import visual_plt
 import utils
-
+import pickle
 
 ####--------------------------------------------------------------------------------------------------------------####
 
@@ -22,6 +22,9 @@ def validate(model, dataset, batch_size=32, test_size=1024, verbose=True, allowe
     # Set model to eval()-mode
     mode = model.training
     model.eval()
+    complet_labels = {"gd":[],"pr":[]}
+
+
 
     # Apply task-specifc "gating-mask" for each hidden fully connected layer (or remove it!)
     if hasattr(model, "mask_dict") and model.mask_dict is not None:
@@ -51,6 +54,8 @@ def validate(model, dataset, batch_size=32, test_size=1024, verbose=True, allowe
                 scores = model(data) if (allowed_classes is None) else model(data)[:, allowed_classes]
                 _, predicted = torch.max(scores, 1)
         # -update statistics
+        complet_labels["gd"].append(labels.detach())
+        complet_labels["pr"].append(predicted.detach())
         total_correct += (predicted == labels).sum().item()
         total_tested += len(data)
     print(total_tested,total_correct)
@@ -61,7 +66,7 @@ def validate(model, dataset, batch_size=32, test_size=1024, verbose=True, allowe
     model.train(mode=mode)
     if verbose:
         print('=> precision: {:.3f}'.format(precision))
-    return precision
+    return precision, complet_labels
 
 def validate5(model, dataset, batch_size=32, test_size=1024, verbose=True, allowed_classes=None,
              with_exemplars=False, no_task_mask=False, task=None):
@@ -142,7 +147,7 @@ def precision(model, datasets, current_task, iteration, classes_per_task=None, s
             allowed_classes = None
             precs.append(validate(model, datasets[i], test_size=test_size, verbose=verbose,
                                   allowed_classes=allowed_classes, with_exemplars=with_exemplars,
-                                  no_task_mask=no_task_mask, task=i+1))
+                                  no_task_mask=no_task_mask, task=i+1)[0])
         else:
             precs.append(0)
     average_precs = sum([precs[task_id] for task_id in range(current_task)]) / current_task

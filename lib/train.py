@@ -11,6 +11,7 @@ from continual_learner import ContinualLearner
 from encoder import meta_train_a_batch, bgd_train_a_batch
 import evaluate
 import datetime
+import pickle
 import os
 import csv
 import datetime
@@ -58,6 +59,9 @@ def train_cl(model, train_datasets, test_datasets, replay_mode="none", scenario=
 
     # Loop over all tasks.
     previous_datasets = None
+    heat_map_labels = {}
+    nb_times = {8:1,16:2,32:4,64:4,128:8}
+
     for task, train_dataset in enumerate(train_datasets, 1):
 
         if task>1:
@@ -136,9 +140,12 @@ def train_cl(model, train_datasets, test_datasets, replay_mode="none", scenario=
 
         # Loop over all iterations
         #iters_to_use = iters if (generator is None) else max(iters, gen_iters)
-        iters_to_use = int(len(training_dataset)/batch_size)*2
+        
+        if task==1:
+            iters_to_use = int(len(training_dataset)/batch_size)*2
+        else:
+            iters_to_use = int(len(training_dataset)/batch_size) * 2
         #iters_to_use = 5
-
 
         for batch_index in range(1, iters_to_use+1):
 
@@ -267,18 +274,24 @@ def train_cl(model, train_datasets, test_datasets, replay_mode="none", scenario=
                 # Train the main model with this batch
                 #rnt = 0.5
                 rnt = 1./task
-                if model.meta == 0:
-                    if model.optim_type == "bgd":
-                        loss_dict = bgd_train_a_batch(model,x,y)
+
+                for _ in range(nb_times[batch_size]):
+                    if model.meta == 0:
+                        if model.optim_type == "bgd":
+                            loss_dict = bgd_train_a_batch(model,x,y)
+                        elif model.da == 1:
+                            loss_dict = model.train_a_batch_contrastive(x, y, x_=x_, y_=y_, scores=scores, scores_=scores_,
+                                                    active_classes=active_classes, task=task, rnt = rnt,list_attentions_previous=list_attentions_previous)
+
+                        else:
+                            loss_dict = model.train_a_batch(x, y, x_=x_, y_=y_, scores=scores, scores_=scores_,
+                                                    active_classes=active_classes, task=task, rnt = rnt,list_attentions_previous=list_attentions_previous)
                     else:
-                        loss_dict = model.train_a_batch(x, y, x_=x_, y_=y_, scores=scores, scores_=scores_,
-                                                active_classes=active_classes, task=task, rnt = rnt,list_attentions_previous=list_attentions_previous)
-                else:
-                    loss_dict = meta_train_a_batch(model, x, y,batch_idx=batch_index,memory=previous_datasets, task=task,s=4,previous_model=previous_model,mode = model.meta_mode)
+                        loss_dict = meta_train_a_batch(model, x, y,batch_idx=batch_index,memory=previous_datasets, task=task,s=4,previous_model=previous_model,mode = model.meta_mode)
 
 
-                if model.use_schedular==1 and batch_index%99==0:
-                    model.schedular.step()
+                    if model.use_schedular==1 and batch_index%99==0:
+                        model.schedular.step()
 
                 # Update running parameter importance estimates in W
                 if isinstance(model, ContinualLearner) and (model.si_c>0):
@@ -410,17 +423,30 @@ def train_cl(model, train_datasets, test_datasets, replay_mode="none", scenario=
             elif model.rs == 1:
                 Exact = True
 
-        precs = [evaluate.validate(
-            model, test_datasets[i], verbose=False, test_size=None, task=i + 1, with_exemplars=False,
-            allowed_classes= None
-        ) for i in range(len(test_datasets))]
+        precs = []
+        complet_labels = []
+        
+        if model.retrain == 1:
+            model.retrain_classifier()
+        
+        
+        for i in range(len(test_datasets)):
+            a,b = evaluate.validate(
+                model, test_datasets[i], verbose=False, test_size=None, task=i + 1, with_exemplars=False,
+                allowed_classes=None
+            )
+            precs.append(a)
+            complet_labels.append(b)
+
+        heat_map_labels[task] = complet_labels
         output.append(precs)
 
-        precs5 = [evaluate.validate5(
-            model, test_datasets[i], verbose=False, test_size=None, task=i + 1, with_exemplars=False,
-            allowed_classes=None
-        ) for i in range(len(test_datasets))]
-        output5.append(precs5)
+
+        # precs5 = [evaluate.validate5(
+        #     model, test_datasets[i], verbose=False, test_size=None, task=i + 1, with_exemplars=False,
+        #     allowed_classes=None
+        # ) for i in range(len(test_datasets))]
+        # output5.append(precs5)
 
     os.makedirs(savepath+'/top5',exist_ok=True)
     savepath1=savepath+'/'+str(datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S'))+'.csv'
@@ -428,11 +454,16 @@ def train_cl(model, train_datasets, test_datasets, replay_mode="none", scenario=
     writer=csv.writer(f)    
     writer.writerows(output)        
     f.close()
-    savepath5=savepath+'/top5/'+str(datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S'))+'.csv'
-    f = open(savepath5, 'w')
-    writer=csv.writer(f)    
-    writer.writerows(output5)        
-    f.close()
+
+    savepath_cl = savepath + '/' + str(datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S')) + '.pkl'
+    with open(savepath_cl,"wb") as fp:
+        pickle.dump(heat_map_labels,fp)
+
+    # savepath5=savepath+'/top5/'+str(datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S'))+'.csv'
+    # f = open(savepath5, 'w')
+    # writer=csv.writer(f)
+    # writer.writerows(output5)
+    # f.close()
     print(savepath)
 
 

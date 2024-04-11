@@ -76,8 +76,8 @@ def _solver_loss_cb(log, visdom, model=None, tasks=None, iters_per_task=None, re
         if progress_bar and bar is not None:
             task_stm = "" if (tasks is None) else " Task: {}/{} |".format(task, tasks)
             bar.set_description(
-                '  <SOLVER>   |{t_stm} training loss: {loss:.3} | training precision: {prec:.3} |'
-                    .format(t_stm=task_stm, loss=loss_dict['loss_total'], prec=loss_dict['precision'])
+                '  <SOLVER>   |{t_stm} loss_cur: {cur:.3} | loss_replay: {replay:.3} |  loss_ins: {ins:.3} | loss_total: {total:.3} |'
+                    .format(t_stm=task_stm, cur=loss_dict['loss_current'], replay=loss_dict['loss_replay'], ins = loss_dict["ins_loss"], total=loss_dict["loss_total"])
             )
             bar.update(1)
 

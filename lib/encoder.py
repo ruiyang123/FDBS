@@ -2,6 +2,8 @@ import copy
 import numpy as np
 import torch
 from torch.nn import functional as F
+from torch.cuda.amp import autocast as autocast
+from torch.cuda.amp import GradScaler
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from linear_nets import MLP,fc_layer,vgg16
@@ -16,6 +18,39 @@ from torch import optim
 from collections import OrderedDict
 from opt_fromp import opt_fromp
 from torch.utils.data import ConcatDataset, DataLoader
+from my_transform import *
+
+
+
+def rot_inner_all(x):
+    num = x.shape[0]
+    c, h, w = x.shape[1], x.shape[2], x.shape[3]
+
+    R = x.repeat(4, 1, 1, 1)
+    a = x.permute(0, 1, 3, 2)
+    a = a.view(num, c, 2, h//2, w)
+
+    a = a.permute(2, 0, 1, 3, 4)
+
+    s1 = a[0]
+    s2 = a[1]
+    s1_1 = torch.rot90(s1, 2, (2, 3))
+    s2_2 = torch.rot90(s2, 2, (2, 3))
+
+    R[num:2 * num] = torch.cat((s1_1.unsqueeze(2), s2.unsqueeze(2)), dim=2).reshape(num, c, h, w).permute(0, 1, 3, 2)
+    R[3 * num:] = torch.cat((s1.unsqueeze(2), s2_2.unsqueeze(2)), dim=2).reshape(num, c, h, w).permute(0, 1, 3, 2)
+    R[2 * num:3 * num] = torch.cat((s1_1.unsqueeze(2), s2_2.unsqueeze(2)), dim=2).reshape(num, c, h, w).permute(0, 1, 3, 2)
+    return R
+
+
+def Rotation(x):
+    # rotation augmentation in OCM
+    X = rot_inner_all(x)
+    return torch.cat((X, torch.rot90(X, 2, (2, 3))), dim=0)
+
+
+
+
 class PostScalingLayer(nn.Module):
     def __init__(self,classes):
         super(PostScalingLayer, self).__init__()
@@ -239,13 +274,14 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
 
     def __init__(self, image_size, image_channels, classes,
                  fc_layers=3, fc_units=1000, fc_drop=0, fc_bn=True, fc_nl="relu", gated=False,
-                 bias=True, excitability=False, excit_buffer=False, binaryCE=False, binaryCE_distill=False,AGEM=False,fromp=False,select_method=None,ps=None,auto_lwf=None, contrasive=None):
+                 bias=True, excitability=False, excit_buffer=False, binaryCE=False, binaryCE_distill=False,AGEM=False,fromp=False,select_method=None,ps=None,auto_lwf=None, contrasive=None,da=None):
 
         # configurations
         super().__init__()
         self.classes = classes
         self.label = "Classifier"
         self.fc_layers = fc_layers
+        self.simclr = nn.Linear(512, 128)
         self.AGEM = AGEM
 
         self.class_count = Parameter(torch.zeros(classes), requires_grad=False)
@@ -297,6 +333,8 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
         self.rs_sets["scores"] = []
         self.rs_sets["features"] = []
 
+        self.scaler = GradScaler()
+
         ######------SPECIFY MODEL------######
 
         # flatten image to 2D-tensor
@@ -318,6 +356,22 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
         self.ps = ps
         if self.ps:
             self.ps_layer = PostScalingLayer(classes)
+
+        input_size = [3,64,64]
+
+
+        self.da = da
+        if self.da:
+            hflip = HorizontalFlipLayer().cuda()
+            with torch.no_grad():
+                resize_scale = (0.3, 1.0)
+                color_gray = RandomColorGrayLayer(p=0.25).cuda()
+                resize_crop = RandomResizedCropLayer(scale=resize_scale,
+                                                        size=[input_size[1], input_size[2], input_size[0]]).cuda()
+                self.transform = torch.nn.Sequential(
+                    hflip,
+                    color_gray,
+                    resize_crop)
 
 
 
@@ -377,6 +431,14 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
             x = self.out_layers(x)
             return x
 
+    def project(self,x):
+        out = self.feature_extractor_layer(x)
+        out = torch.flatten(out,1)
+        feature = out
+        out = self.simclr(out)
+        return feature, out
+
+
     def feature_extractor(self, images):
         return self.feature_extractor_layer(images)
     def flatten_feature(self,images):
@@ -393,6 +455,72 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
         x = torch.flatten(x, 1)
         x = self.out_layers(x)
         return x
+
+    def get_weighted_samples(self):
+        subsets_weights = []
+        events = []
+        batch_idx = []
+        weights_norm = torch.norm(self.out_layers.weight.data,dim=1)
+        imgs = torch.stack(self.rs_sets["imgs"])
+        labels = torch.stack(self.rs_sets["labels"])
+        for label in range(len(weights_norm)):
+            sub_index = labels==label
+
+            if sub_index.sum()>0:
+                subsets_weights.append(weights_norm[label].cpu())
+                events.append(label)
+        subsets_weights = 1./torch.tensor(subsets_weights)
+        probabilities = subsets_weights/subsets_weights.sum()
+        probabilities = probabilities.to(torch.float64)
+        samples = np.random.choice(events,size=self.memory_batch,p=probabilities/probabilities.sum())
+        labels_nonzero, counts = np.unique(samples,return_counts=True)
+        for label,count in zip(labels_nonzero,counts):
+            sub_index = torch.tensor(np.arange(0,len(labels),1))[labels==label]
+            sub_batch_idx = np.random.choice(sub_index,size=count)
+            sub_batch_idx = torch.tensor(sub_batch_idx)
+            batch_idx.append(sub_batch_idx)
+        batch_idx = torch.cat(batch_idx,dim=0)
+        batch_idx = batch_idx.to(torch.long)
+        return imgs[batch_idx],labels[batch_idx],batch_idx
+
+
+    def get_balanced_samples(self):
+
+        batch_idx = []
+        imgs = torch.stack(self.rs_sets["imgs"])
+        labels = torch.stack(self.rs_sets["labels"])
+        labels_nonzero = labels.unique()
+        counts = torch.ones_like(labels)*2
+
+        for label,count in zip(labels_nonzero,counts):
+            sub_index = torch.tensor(np.arange(0,len(labels),1))[labels==label]
+            sub_batch_idx = np.random.choice(sub_index,size=count.item())
+            sub_batch_idx = torch.tensor(sub_batch_idx)
+            batch_idx.append(sub_batch_idx)
+        batch_idx = torch.cat(batch_idx,dim=0)
+        batch_idx = batch_idx.to(torch.long)
+        return imgs[batch_idx], labels[batch_idx], batch_idx
+
+    
+    def retrain_classifier(self,iters=10):
+        self.train()
+        optimizer = optim.Adam(self.out_layers.parameters(), betas=(0.9, 0.999),lr=1e-5)
+        correct = 0
+        total = 0
+        for i in range(iters):
+            x,y,_ = self.get_balanced_samples()
+            x,y = x.cuda(),y.cuda()
+            pred = self(x)
+            loss_ce = F.cross_entropy(pred,y)
+
+            loss_ce.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            total += len(y)
+            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+            acc = correct/total
+            print("Step : {}, Acc : {}".format(i,acc))
+
 
     def re_init_optim(self):
         self.optim_list = [{'params': filter(lambda p: p.requires_grad,self.parameters()), 'lr': self.lr}]
@@ -461,12 +589,12 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
         scores = np.exp(scores.detach().cpu())
         return scores
 
-    def select_FDBS(self, x, y, preds_y):
+    def select_FDBS_norm(self, x, y, preds_y):
         batch_features = self.flatten_feature(x)
         IWL_loss = None
         N = torch.sum(self.class_count).item()
         if len(self.rs_sets["features"]) != 0:
-            scores,IWL_loss = utils.compute_importance_weight(self.rs_sets,batch_features,y,self.budget,self.batch_size,sigma=5,tau=5)
+            scores,IWL_loss = utils.compute_importance_weight_norm(self.rs_sets,batch_features,y,self.budget,self.batch_size,sigma=0.4,tau=10)
 
         for i, (img, label) in enumerate(zip(x, y)):
             if N < self.budget:
@@ -482,7 +610,7 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
                         self.rs_sets["features"] = features_M.detach().cpu()
                         outputs = self.get_feature(imgs.cuda())
                         self.rs_sets["scores"] = outputs.detach().cpu()
-                    scores,IWL_loss = utils.compute_importance_weight(self.rs_sets,batch_features,y,self.budget,self.batch_size,sigma=5,tau=5)
+                    scores,IWL_loss = utils.compute_importance_weight_norm(self.rs_sets,batch_features,y,self.budget,self.batch_size,sigma=0.4,tau=10)
 
                 if index*scores[i].item() < self.budget:
                     if self.remove_method == "rs":
@@ -498,7 +626,46 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
                         self.rs_sets["scores"][selected_index] = scores[i]
                     N = N + 1
         self.update_count(y)
+        return IWL_loss
 
+
+    def select_FDBS(self, x, y, preds_y):
+        batch_features = self.flatten_feature(x)
+        IWL_loss = None
+        N = torch.sum(self.class_count).item()
+        if len(self.rs_sets["features"]) != 0:
+            scores,IWL_loss = utils.compute_importance_weight(self.rs_sets,batch_features,y,self.budget,self.batch_size,sigma=5,tau=10)
+
+        for i, (img, label) in enumerate(zip(x, y)):
+            if N < self.budget:
+                self.rs_sets["imgs"].append(img.cpu())
+                self.rs_sets["labels"].append(label.cpu())
+                N = N + 1
+            else:
+                index = np.random.randint(0, N)
+                if len(self.rs_sets["features"]) == 0:
+                    imgs = torch.stack(self.rs_sets["imgs"])
+                    with torch.no_grad():
+                        features_M = self.flatten_feature(imgs.cuda())
+                        self.rs_sets["features"] = features_M.detach().cpu()
+                        outputs = self.get_feature(imgs.cuda())
+                        self.rs_sets["scores"] = outputs.detach().cpu()
+                    scores,IWL_loss = utils.compute_importance_weight(self.rs_sets,batch_features,y,self.budget,self.batch_size,sigma=5,tau=10)
+
+                if index*scores[i].item() < self.budget:
+                    if self.remove_method == "rs":
+                        self.rs_sets["imgs"][index] = img.cpu()
+                        self.rs_sets["labels"][index] = label.cpu()
+                        self.rs_sets["features"][index] = batch_features[i].detach().cpu()
+                        self.rs_sets["scores"][index] = scores[i]
+                    else:
+                        selected_index = self.remove_sample()
+                        self.rs_sets["imgs"][selected_index] = img.cpu()
+                        self.rs_sets["labels"][selected_index] = label.cpu()
+                        self.rs_sets["features"][selected_index] = batch_features[i].detach().cpu()
+                        self.rs_sets["scores"][selected_index] = scores[i]
+                    N = N + 1
+        self.update_count(y)
         return IWL_loss
 
     def remove_sample(self):
@@ -527,6 +694,7 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
             labels = torch.stack(self.rs_sets["labels"])
             batch_index = np.random.randint(0,len(self.rs_sets["labels"])-1,self.memory_batch)
             return imgs[batch_index],labels[batch_index],batch_index
+
     def update_memory_sets_scores(self,batch_index,scores_):
         if len(self.rs_sets["scores"])>0:
             self.rs_sets["scores"][batch_index] = scores_.detach().cpu()
@@ -535,6 +703,125 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
         if len(self.rs_sets["features"])>0:
             self.rs_sets["features"][batch_index] = batch_features.detach().cpu()
 
+
+
+    def train_a_batch_contrastive(self, x, y, scores=None, x_=None, y_=None, scores_=None, rnt=0.5, active_classes=None, task=1,list_attentions_previous=None):
+        # Set model to training-mode
+        self.train()
+
+        # Reset optimizer
+        self.optimizer.zero_grad()
+        k = 8
+        ##--(1)-- REPLAYED DATA --##
+
+        loss_replay = None
+        with autocast():
+
+            if x_ is not None:
+                x_.requires_grad = True
+                x_, y_ = x_.cuda(non_blocking=True), y_.cuda(non_blocking=True)
+                buffer_pred = self(self.transform(x_))
+                loss_replay = F.cross_entropy(buffer_pred,y_)
+
+            ##--(2)-- CURRENT DATA --##
+
+                x,y = x.cuda(non_blocking=True),y.cuda(non_blocking=True)
+
+            if task == 1:
+                rot_x = Rotation(x)
+                print("1")
+                rot_x_aug = self.transform(rot_x)
+                imgages_pair = torch.cat([rot_x, rot_x_aug], dim=0)
+                rot_sim_labels = torch.cat([y + self.classes * i for i in range(k)], dim=0)
+                features, projections = self.project(imgages_pair)
+                projections = F.normalize(projections)
+
+                features = F.normalize(features)
+
+                dim_diff = features.shape[1] - projections.shape[1]  # 512 - 128
+                dim_begin = torch.randperm(dim_diff)[0]
+                dim_len = projections.shape[1]
+
+                sim_matrix = torch.matmul(projections, features[:, dim_begin:dim_begin + dim_len].t())
+                sim_matrix += torch.mm(projections, projections.t())
+
+                ins_loss = utils.Supervised_NT_xent_n(sim_matrix, labels=rot_sim_labels, temperature=0.07)
+            else:
+                rot_sim_labels = torch.cat([y + self.classes * i for i in range(k)], dim=0)
+                rot_sim_labels_r = torch.cat([y_ + self.classes * i for i in range(k)], dim=0)
+                rot_x = Rotation(x)
+                rot_x_r = Rotation(x_)
+                rot_x_aug = self.transform(rot_x)
+                rot_x_r_aug = self.transform(rot_x_r)
+                images_pair = torch.cat([rot_x, rot_x_aug], dim=0)
+                images_pair_r = torch.cat([rot_x_r, rot_x_r_aug], dim=0)
+
+                all_images = torch.cat((images_pair, images_pair_r), dim=0)
+
+                features, projections = self.project(all_images)
+
+                projections_x = projections[:images_pair.shape[0]]
+                projections_x_r = projections[images_pair.shape[0]:]
+
+                projections_x = F.normalize(projections_x)
+                projections_x_r = F.normalize(projections_x_r)
+
+                # instance-wise contrastive loss in OCM
+                features_x = F.normalize(features[:images_pair.shape[0]])
+                features_x_r = F.normalize(features[images_pair.shape[0]:])
+
+                dim_diff = features_x.shape[1] - projections_x.shape[1]
+                dim_begin = torch.randperm(dim_diff)[0]
+                dim_begin_r = torch.randperm(dim_diff)[0]
+                dim_len = projections_x.shape[1]
+
+                sim_matrix = 0.5 * torch.matmul(projections_x, features_x[:, dim_begin:dim_begin + dim_len].t())
+                sim_matrix_r = 0.5 * torch.matmul(projections_x_r,
+                                                              features_x_r[:, dim_begin_r:dim_begin_r + dim_len].t())
+
+                sim_matrix += 0.5 * torch.mm(projections_x, projections_x.t())
+                sim_matrix_r += 0.5 * torch.mm(projections_x_r, projections_x_r.t())
+
+                loss_sim_r = utils.Supervised_NT_xent_uni(sim_matrix_r, labels=rot_sim_labels_r, temperature=0.07)
+                loss_sim = utils.Supervised_NT_xent_n(sim_matrix, labels=rot_sim_labels, temperature=0.07)
+
+                ins_loss = loss_sim_r + loss_sim
+
+
+            current_pred = self(self.transform(x))
+            loss_cur = F.cross_entropy(current_pred,y)
+            loss_ce = loss_cur if (x_ is None) else rnt * loss_cur + (1 - rnt) * loss_replay
+            loss_total = loss_ce + ins_loss
+
+
+
+        # Take optimization-step
+        self.scaler.scale(loss_total).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad()
+
+        if self.select_method == "FDBS":
+            IWL_loss = self.select_FDBS(x, y, y_hat.detach().cpu())
+            if (IWL_loss is not None) and (self.iwl == 1):
+                IWL_loss.backward()
+                self.optimizer.step()
+
+        else:
+            self.select_random_reservoir(x.detach(), y.detach(), current_pred.detach().cpu())
+
+        # Return the dictionary with different training-loss split in categories
+        return {
+            'loss_total': loss_total.item(),
+            'loss_current': loss_cur.item() if x is not None else 0.,
+            'loss_replay': loss_replay.item() if (loss_replay is not None) and (x is not None) else 0.,
+            'ins_loss': ins_loss.item(),
+            'pred': 0.,
+            'pred_r': 0.,
+            'distil_r': 0.,
+            'ewc': 0.,
+            'precision': 0.,
+        }
 
 
 
@@ -789,17 +1076,23 @@ class Classifier(ContinualLearner, Replayer, ExemplarHandler):
             if (IWL_loss is not None) and (self.iwl==1):
                 IWL_loss.backward()
                 self.optimizer.step()
-
+        
+        elif self.select_method =="FDBSnorm":
+            IWL_loss = self.select_FDBS_norm(x,y,y_hat.detach().cpu())
+            if (IWL_loss is not None) and (self.iwl==1):
+                IWL_loss.backward()
+                self.optimizer.step()
         else:
             self.select_random_reservoir(x.detach(),y.detach(),y_hat.detach().cpu())
 
         # Return the dictionary with different training-loss split in categories
         return {
             'loss_total': loss_total.item(),
-            'loss_current': loss_cur.item() if x is not None else 0,
-            'loss_replay': loss_replay.item() if (loss_replay is not None) and (x is not None) else 0,
-            'pred': predL.item() if predL is not None else 0,
-            'pred_r': sum(predL_r).item() / n_replays if (x_ is not None and predL_r[0] is not None) else 0,
+            'ins_loss': 0.,
+            'loss_current': loss_cur.item() if x is not None else 0.0,
+            'loss_replay': loss_replay.item() if (loss_replay is not None) and (x is not None) else 0.0,
+            'pred': predL.item() if predL is not None else 0.,
+            'pred_r': sum(predL_r).item() / n_replays if (x_ is not None and predL_r[0] is not None) else 0.,
             'distil_r': sum(distilL_r).item() / n_replays if (x_ is not None and distilL_r[0] is not None) else 0,
             'ewc': ewc_loss.item(), 'si_loss': surrogate_loss.item(),
             'precision': precision if precision is not None else 0.,

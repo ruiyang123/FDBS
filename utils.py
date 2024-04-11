@@ -194,11 +194,43 @@ def loss_fn_kd_binary(scores, target_scores, T=2.):
 
     return KD_loss
 
+
+def compute_importance_weight_norm(rs_sets,batch_features,batch_labels,budget,batch_size,sigma=0.3,tau=0.3,eps=1e-8):
+    labels = torch.stack(rs_sets["labels"]).cuda()
+    features = rs_sets["features"].cuda()
+
+    features = F.normalize(features)
+    batch_features = F.normalize(batch_features)
+
+    dist_M = torch.cdist(features,features,p=2)
+    dist_B_M = torch.cdist(batch_features, features, p=2)
+
+    min_batch, min_batch_index = torch.min(dist_B_M, 1)
+    min_memory, min_memory_index = torch.min(dist_M + torch.eye(budget).cuda() * 1000000, 1)
+    alpha = torch.exp(-(dist_M - min_memory.repeat(budget,1).T) * (dist_M - min_memory.repeat(budget,1).T) / sigma ** 2)
+
+    alpha_mask = torch.ones_like(alpha)
+    alpha_mask.fill_diagonal_(False)
+
+
+    a = torch.sum(dist_M*alpha*alpha_mask, 1) / (torch.sum(alpha*alpha_mask, 1)+eps)
+
+    batch_labels = batch_labels.cuda()
+    if_same_label = (labels==batch_labels.repeat(budget,1).T)*2-1
+
+    beta = torch.exp(-(dist_B_M - min_batch.repeat(budget, 1).T) * (dist_B_M - min_batch.repeat(budget, 1).T) / sigma ** 2)
+    W = torch.exp(if_same_label * (dist_B_M - a.repeat(batch_size,1))/(dist_B_M + a.repeat(batch_size,1))*beta*tau)
+    w = torch.mean(W.detach().cpu(),1)
+    IWL_loss = IWL(W,beta)
+
+    return w,0.1*IWL_loss
+
+
 def compute_importance_weight(rs_sets,batch_features,batch_labels,budget,batch_size,sigma=5,tau=5):
     labels = torch.stack(rs_sets["labels"]).cuda()
     features = rs_sets["features"].cuda()
 
-    a = batch_features+1
+
     dist_M = torch.cdist(features,features,p=2)
     dist_B_M = torch.cdist(batch_features, features, p=2)
 
@@ -214,7 +246,6 @@ def compute_importance_weight(rs_sets,batch_features,batch_labels,budget,batch_s
     W = torch.exp(if_same_label * (dist_B_M - a.repeat(batch_size,1))/(dist_B_M + a.repeat(batch_size,1))*beta*tau)
     w = torch.mean(W.detach().cpu(),1)
     IWL_loss = IWL(W,beta)
-    print(w,IWL_loss)
     return w,0.1*IWL_loss
 ##-------------------------------------------------------------------------------------------------------------------##
 
@@ -222,6 +253,68 @@ def compute_importance_weight(rs_sets,batch_features,batch_labels,budget,batch_s
 #############################
 ## Data-handling functions ##
 #############################
+
+
+def Supervised_NT_xent_n(sim_matrix, labels, temperature=0.5, chunk=2, eps=1e-8):
+    """
+        Code from OCM : https://github.com/gydpku/OCM
+        Compute NT_xent loss
+        - sim_matrix: (B', B') tensor for B' = B * chunk (first 2B are pos samples)
+    """
+    device = sim_matrix.device
+    labels1 = labels.repeat(2)
+
+    logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
+
+    sim_matrix = sim_matrix - logits_max.detach()
+    B = sim_matrix.size(0) // chunk
+
+    eye = torch.zeros((B * chunk, B * chunk), dtype=torch.bool, device=device)
+    eye[:, :].fill_diagonal_(True)
+    sim_matrix = torch.exp(sim_matrix / temperature) * (~eye)
+
+    denom = torch.sum(sim_matrix, dim=1, keepdim=True)
+
+    sim_matrix = -torch.log(sim_matrix / (denom + eps) + eps)
+    labels1 = labels1.contiguous().view(-1, 1)
+
+    Mask1 = torch.eq(labels1, labels1.t()).float().to(device)
+    Mask1 = Mask1 / (Mask1.sum(dim=1, keepdim=True) + eps)
+
+    loss2 = 2 * torch.sum(Mask1 * sim_matrix) / (2 * B)
+    loss1 = torch.sum(sim_matrix[:B, B:].diag() + sim_matrix[B:, :B].diag()) / (2 * B)
+
+    return loss1 + loss2
+
+
+def Supervised_NT_xent_uni(sim_matrix, labels, temperature=0.5, chunk=2, eps=1e-8):
+    """
+        Code from OCM: https://github.com/gydpku/OCM
+        Compute NT_xent loss
+        - sim_matrix: (B', B') tensor for B' = B * chunk (first 2B are pos samples)
+    """
+
+    device = sim_matrix.device
+    labels1 = labels.repeat(2)
+
+    logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
+
+    sim_matrix = sim_matrix - logits_max.detach()
+    B = sim_matrix.size(0) // chunk
+
+    sim_matrix = torch.exp(sim_matrix / temperature)
+    denom = torch.sum(sim_matrix, dim=1, keepdim=True)
+
+    sim_matrix = -torch.log(sim_matrix / (denom + eps) + eps)
+    labels1 = labels1.contiguous().view(-1, 1)
+
+    Mask1 = torch.eq(labels1, labels1.t()).float().to(device)
+    Mask1 = Mask1 / (Mask1.sum(dim=1, keepdim=True) + eps)
+
+    return torch.sum(Mask1 * sim_matrix) / (2 * B)
+
+
+
 
 def get_data_loader(dataset, batch_size, cuda=False, collate_fn=None, drop_last=False, augment=False,shuffle=True):
     '''Return <DataLoader>-object for the provided <DataSet>-object [dataset].'''

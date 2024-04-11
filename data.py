@@ -242,7 +242,7 @@ class FairwasteDataset(Dataset):
             labels = list(df["label"][(df["task"] == batch_num)&(df["type"] == "train")])
 
 
-            self.imgs.extend([Image.open(os.path.join(dir_name,x)).convert('RGB').resize((224,224)) for x in temp])
+            self.imgs.extend([Image.open(os.path.join(dir_name,x)).convert('RGB').resize((64,64)) for x in temp])
             self.labels.extend(labels)
             print("  --> batch{}'-dataset consisting of {} samples".format(batch_num, len(self)))
         else:
@@ -251,7 +251,7 @@ class FairwasteDataset(Dataset):
             temp = list(df["img"][(df["task"] == batch_num) & (df["type"] == "test")])
             labels = list(df["label"][(df["task"] == batch_num) & (df["type"] == "test")])
 
-            self.imgs.extend([Image.open(os.path.join(dir_name,x)).convert('RGB').resize((224,224)) for x in temp])
+            self.imgs.extend([Image.open(os.path.join(dir_name,x)).convert('RGB').resize((64,64)) for x in temp])
             self.labels.extend(labels)
             print("  --> test'-dataset consisting of {} samples".format(len(self)))
 
@@ -611,7 +611,7 @@ def get_multitask_experiment(name, scenario, tasks, only_config=False, verbose=F
         for i in range(tasks):
             train_datasets.append(FairwasteDataset(i, df=df,mode='train', own_transform=my_transform))
             test_datasets.append(FairwasteDataset(i, df=df,mode='test', own_transform=my_transform))
-        config = {'size': 224, 'channels': 3, 'classes': 13}
+        config = {'size': 64, 'channels': 3, 'classes': 13}
 
 
 
