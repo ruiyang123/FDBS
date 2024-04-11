@@ -1,4 +1,4 @@
-# ERLWF
+# FDBS
 
 ## Requirements
 ```bash
@@ -56,17 +56,16 @@ python pk_gene_FW.py
 To create the scenario to be used for training.
 
 ## Run Methods
-```bash
-For Experience Replay :
-python main.py --factor {} --iters {} --savepath={} --optimizer=adam --tasks {} --batch {} --reInitOptimizer 1 --rs 1 --budget={} --select-memory random --meta 0 --lr 5e-5"
-```
 
 ```bash
 For FDBS :
-python main.py --factor scenario_name --iters 300 --savepath savepath --tasks task_num --repaly=exemplars --budget budget --select-memory FDBS
+python main.py --factor scenario_name --iters 1000 --savepath=savepath --optimizer=adam --tasks task_num --batch 16 --reInitOptimizer 1 --rs 1 --budget=400 --remove random --select-memory FDBS --lr 1e-5
 ```
 
-
+```bash
+For FDBS+IWL :
+python main.py --factor scenario_name --iters 1000 --savepath=savepath --optimizer=adam --tasks task_num --batch 16 --reInitOptimizer 1 --rs 1 --budget=400 --remove random --select-memory FDBS --lr 1e-5 --iwl 1 
+```
 
 ## Run Experiment
 
