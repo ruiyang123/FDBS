@@ -74,6 +74,10 @@ For FairWaste DataSet :
 python Experiment_FairWaste.py
 ```
 
+## Other Methods
+
+[OnPro](https://github.com/weilllllls/OnPro)
+
 
 
 
